@@ -37,9 +37,14 @@ static inline void log_error(const char *name, const char *fmt, ...)
     log_vprintf("ERROR", name, fmt, args);
     va_end(args);
 }
-
+#ifdef DEBUG
 #define INFO(name, fmt, ...) log_info(#name, fmt, ##__VA_ARGS__)
 #define ERROR(name, fmt, ...) log_error(#name, fmt, ##__VA_ARGS__)
 #define DEBUG(name, fmt, ...) log_debug(#name, fmt, ##__VA_ARGS__)
+#else
+#define INFO(name, fmt, ...) log_info(#name, fmt, ##__VA_ARGS__)
+#define ERROR(name, fmt, ...) log_error(#name, fmt, ##__VA_ARGS__)
+#define DEBUG(name, fmt, ...) (void)0
+#endif
 
 #endif /* INTEGRAL_LOG_H */

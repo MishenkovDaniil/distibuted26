@@ -41,7 +41,7 @@ int send_broadcast(int master_sock_udp)
 
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &bcast.sin_addr, ip_str, sizeof(ip_str));
-    INFO(Master, "broadcasting discovery message to %s:%d", ip_str, ntohs(bcast.sin_port));
+    DEBUG(Master, "broadcasting discovery message to %s:%d", ip_str, ntohs(bcast.sin_port));
 
     int msg = 1;
     ssize_t sent = sendto(master_sock_udp, (void *)&msg, sizeof(msg), 0,
@@ -53,7 +53,7 @@ int send_broadcast(int master_sock_udp)
         return -1;
     }
 
-    INFO(Master, "sent master node discovery message, bytes=%zd", sent);
+    DEBUG(Master, "sent master node discovery message, bytes=%zd", sent);
 
     return 0;
 }
@@ -236,7 +236,7 @@ int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *r
                 }
                 else
                 {
-                    INFO(Master, "received task result from worker node");
+                    DEBUG(Master, "received task result from worker node");
                     integral_task_t task;
                     if (recv(new_node_sock, &task, sizeof(task), 0) < 0)
                     {
@@ -256,7 +256,7 @@ int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *r
             }
             else if(events[i].events & EPOLLOUT)
             {
-                INFO(Master, "send task to worker node");
+                DEBUG(Master, "send task to worker node");
                 if (cur_task >= tasks_cnt)
                     continue;
 

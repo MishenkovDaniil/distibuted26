@@ -62,7 +62,7 @@ int start_worker()
 
     char listen_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &server.sin_addr, listen_ip, sizeof(listen_ip));
-	INFO(Worker, "binding UDP discovery socket to %s:%d", listen_ip, ntohs(server.sin_port));
+	DEBUG(Worker, "binding UDP discovery socket to %s:%d", listen_ip, ntohs(server.sin_port));
 
     if (bind(worker->discovery_socket, (struct sockaddr *)&server, sizeof(server)) < 0) {
 		ERROR(Worker, "bind discovery failed: %s", strerror(errno));
@@ -70,7 +70,7 @@ int start_worker()
     }
 
     struct sockaddr_in master_addr;
-    INFO(Worker, "waiting for master node discovery message...");
+    DEBUG(Worker, "waiting for master node discovery message...");
     for (;;)
     {
         int discovery_msg = -1;
@@ -86,14 +86,14 @@ int start_worker()
 
         char master_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &master_addr.sin_addr, master_ip, sizeof(master_ip));
-        INFO(Worker, "received UDP packet from %s:%d, bytes=%d, msg=%d",
+        DEBUG(Worker, "received UDP packet from %s:%d, bytes=%d, msg=%d",
                master_ip, ntohs(master_addr.sin_port), rc, discovery_msg);
         if (discovery_msg != 1)
         {
             ERROR(Worker, "received bad discovery message [%d] from master node", discovery_msg);
             continue;
         }
-        INFO(Worker, "received master node discovery message");
+        DEBUG(Worker, "received master node discovery message");
         master_addr.sin_port = htons(MASTER_PORT);
         break;
     }
@@ -138,7 +138,7 @@ int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
             return -1;
         }
 
-		INFO(Worker, "received task: left = %lf, right = %lf", task.left, task.right);
+		DEBUG(Worker, "received task: left = %lf, right = %lf", task.left, task.right);
         task.function = my_func;
 
         complete_task(&task);
@@ -148,7 +148,7 @@ int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
 			ERROR(Worker, "send failed: %s", strerror(errno));
             return -1;
         }
-		INFO(Worker, "sent task result: %lf", task.result);
+		DEBUG(Worker, "sent task result: %lf", task.result);
     }
 
     close(worker->discovery_socket);
