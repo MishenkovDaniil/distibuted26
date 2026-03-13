@@ -3,7 +3,7 @@
 
 #include <base.h>
 
-int send_broadcast();
+int send_broadcast(int master_sock_udp);
 int start_tcp(integral_task_t *tasks, size_t tasks_cnt);
 int accept_connections();
 int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *result);

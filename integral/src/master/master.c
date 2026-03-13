@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <pthread.h>
 
 #include <log.h>
 #include <parser.h>
@@ -21,22 +22,16 @@ static int master_sock_tcp = 0;
 static int DISCOVERY_PORT = 4000;
 static int MASTER_PORT = 6000;
 
+static const int DISCOVERY_INTERVAL_USEC = 100000; // 100ms
+
+static pthread_t discovery_thread;
+static volatile int discovery_running = 0;
+
 static const double DELTA = 0.01;
 static const int MAX_NODES = 100;
 
-int send_broadcast()
+int send_broadcast(int master_sock_udp)
 {
-    int master_sock_udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (master_sock_udp < 0)
-    {
-		ERROR(Master, "socket failed: %s", strerror(errno));
-        return -1;
-    }
-
-    //set socket to do broadcast
-    int yes = 1;
-    setsockopt(master_sock_udp, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
-
     struct sockaddr_in bcast = { 0 };
     bcast.sin_family = AF_INET;
     bcast.sin_port = htons(DISCOVERY_PORT);
@@ -59,21 +54,79 @@ int send_broadcast()
     }
 
     INFO(Master, "sent master node discovery message, bytes=%zd", sent);
-    sleep(1); //wait for workers to receive message
-    close(master_sock_udp);
+
     return 0;
+}
+
+static void *discovery_loop(void *arg)
+{
+    (void)arg;
+    int master_sock_udp = socket(AF_INET, SOCK_DGRAM, 0);
+    if (master_sock_udp < 0)
+    {
+		ERROR(Master, "socket failed: %s", strerror(errno));
+        return NULL;
+    }
+    //set socket to do broadcast
+    int yes = 1;
+    setsockopt(master_sock_udp, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+
+    while (discovery_running)
+    {
+        if (send_broadcast(master_sock_udp) < 0)
+        {
+            ERROR(Master, "discovery broadcast iteration failed");
+        }
+
+        usleep(DISCOVERY_INTERVAL_USEC);
+    }
+
+    close(master_sock_udp);
+
+    return NULL;
+}
+
+static int start_discovery_thread(void)
+{
+    discovery_running = 1;
+    int rc = pthread_create(&discovery_thread, NULL, discovery_loop, NULL);
+    if (rc != 0)
+    {
+        discovery_running = 0;
+        ERROR(Master, "failed to create discovery thread: %s", strerror(rc));
+        return -1;
+    }
+
+    return 0;
+}
+
+static void stop_discovery_thread(void)
+{
+    if (!discovery_running)
+        return;
+
+    discovery_running = 0;
+    pthread_join(discovery_thread, NULL);
 }
 
 int start_tcp(integral_task_t *tasks, size_t tasks_cnt)
 {
     INFO(Master, "waiting for worker nodes to connect...");
 
-    accept_connections();
-    send_broadcast();
+    if (accept_connections() < 0)
+        return -1;
+
+    if (start_discovery_thread() < 0)
+    {
+        close(master_sock_tcp);
+        return -1;
+    }
+
     int epfd = epoll_create(MAX_NODES);
     if (epfd < 0)
     {
 		ERROR(Master, "failed to create epoll fd: %s", strerror(errno));
+        stop_discovery_thread();
         close(master_sock_tcp);
         return -1;
     }
@@ -84,12 +137,14 @@ int start_tcp(integral_task_t *tasks, size_t tasks_cnt)
     {
 		ERROR(Master, "master routine failed");
         close(epfd);
+        stop_discovery_thread();
         master_shutdown();
         return -1;
     }
 	INFO(Master, "result is %lf", integral_res);
 
     close(epfd);
+    stop_discovery_thread();
     master_shutdown();
     return rc;
 }
@@ -144,7 +199,6 @@ static void accept_new_conn(int epfd)
 
     epoll_ctl(epfd, EPOLL_CTL_ADD, new_node_sock, &event);
 }
-
 int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;

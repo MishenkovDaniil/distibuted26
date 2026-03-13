@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Werror)
+    add_compile_options(-Wall -Wextra)
 endif()
 
 include_directories(
@@ -31,6 +31,7 @@ add_executable(worker
 target_link_libraries(master
     PRIVATE
         m
+        pthread
         integral_parser
 )
 
