@@ -1,0 +1,29 @@
+services:
+  master:
+    build:
+      context: ..
+      dockerfile: docker/master/Dockerfile
+    env_file:
+      - ./config/master.env
+    networks:
+      - integral_network
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/worker/Dockerfile
+    env_file:
+      - ./config/worker.env
+    networks:
+      - integral_network
+    depends_on:
+      - master
+    deploy:
+      replicas: 3
+
+networks:
+  integral_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
