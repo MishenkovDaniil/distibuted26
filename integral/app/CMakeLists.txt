@@ -22,6 +22,11 @@ add_library(task_helpers STATIC
     src/task.c
 )
 
+target_link_libraries(task_helpers
+    PRIVATE
+        m
+)
+
 add_executable(master
     src/master/master.c
     src/master/master.h

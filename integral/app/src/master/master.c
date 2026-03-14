@@ -18,6 +18,11 @@
 
 #include "master.h"
 
+typedef struct {
+    int fd;
+    size_t task_id;
+} conn_info_t;
+
 static int master_sock_tcp = 0;
 
 static int DISCOVERY_PORT = 4000;
@@ -183,6 +188,23 @@ int accept_connections()
     return 0;
 }
 
+static conn_info_t *epoll_event_data_ctor(int fd, size_t task_id)
+{
+    conn_info_t *new_node_info = malloc(sizeof(conn_info_t));
+    if (!new_node_info)    {
+        ERROR(Master, "failed to allocate memory for new node info");
+        return NULL;
+    }
+    new_node_info->fd = fd;
+    new_node_info->task_id = task_id;
+    return new_node_info;
+}
+
+static void epoll_event_data_dtor(conn_info_t *info)
+{
+    free(info);
+}
+
 static void accept_new_conn(int epfd)
 {
     struct sockaddr_in new_node_addr = { 0 };
@@ -197,28 +219,26 @@ static void accept_new_conn(int epfd)
 
     INFO(Master, "new worker node connected");
 
-    epoll_data_t new_node_data = {
-        .fd = new_node_sock,
-    };
-
     struct epoll_event event = {0};
     event.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
-    event.data = new_node_data;
+    event.data.ptr = epoll_event_data_ctor(new_node_sock, SIZE_MAX);
 
     epoll_ctl(epfd, EPOLL_CTL_ADD, new_node_sock, &event);
 }
 
-static void requeue_task(task_t *task, size_t *cur_task_id)
+static void requeue_task(task_t *tasks, size_t task_id, size_t *cur_task_id)
 {
-    if (task->base.task_id == *cur_task_id)
+    if (task_id == SIZE_MAX)
         return;
 
+    task_t *task = tasks + task_id;
     if (get_task_state(task) == TASK_PENDING ||
         get_task_state(task) == TASK_COMPLETED)
         return;
 
     set_task_state(task, TASK_PENDING);
-    *cur_task_id = fmin(*cur_task_id, task->base.task_id);
+    if (task->base.task_id < *cur_task_id)
+        *cur_task_id = task->base.task_id;
 }
 
 static inline void skip_completed_tasks(size_t *cur_task_id, task_t *tasks, size_t tasks_cnt)
@@ -235,7 +255,7 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 
     struct epoll_event event1 = { 0 };
     event1.events = EPOLLIN | EPOLLHUP | EPOLLERR;
-    event1.data.fd = master_sock_tcp;
+    event1.data.ptr = epoll_event_data_ctor(master_sock_tcp, SIZE_MAX);
 
     epoll_ctl(epfd, EPOLL_CTL_ADD, master_sock_tcp, &event1);
 
@@ -254,9 +274,18 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 
         for (int i = 0; i < ready_nodes_cnt; ++i)
         {
+            conn_info_t *conn_info = (conn_info_t *)events[i].data.ptr;
+            if (!conn_info)
+            {
+                ERROR(Master, "invalid epoll event data");
+                continue;
+            }
+
+            int new_node_sock = conn_info->fd;
+            const size_t task_id = conn_info->task_id;
+
             if(events[i].events & EPOLLIN)
             {
-                int new_node_sock = events[i].data.fd;
                 if (new_node_sock == master_sock_tcp)
                 {
                     INFO(Master, "accept_new_conn");
@@ -266,12 +295,13 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                 {
                     DEBUG(Master, "received task result from worker node");
                     answer_t ans;
-                    // task_id = ... need to get from epoll node data
-                    if (recv(new_node_sock, &ans, sizeof(ans), 0) < 0)
+                    if (recv(new_node_sock, &ans, sizeof(ans), 0) <= 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
                         epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                        // requeue_task (tasks + task_id, &cur_task);
+                        close(new_node_sock);
+                        epoll_event_data_dtor(conn_info);
+                        requeue_task (tasks, task_id, &cur_task);
                         continue;
                     }
 
@@ -279,7 +309,9 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                     {
                         ERROR(Master, "received invalid task id %d", ans.task_id);
                         epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                        // requeue_task (tasks + task_id, &cur_task);
+                        close(new_node_sock);
+                        epoll_event_data_dtor(conn_info);
+                        requeue_task (tasks, task_id, &cur_task);
                         continue;
                     }
 
@@ -294,9 +326,11 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                         ready_nodes++;
                     }
 
+                    epoll_event_data_dtor(conn_info);
+
                     struct epoll_event event = { 0 };
                     event.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
-                    event.data = events[i].data;
+                    event.data.ptr = epoll_event_data_ctor(new_node_sock, SIZE_MAX);
 
                     epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
                 }
@@ -309,30 +343,35 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                 if (cur_task >= tasks_cnt)
                     continue;
 
-                int new_node_sock = events[i].data.fd;
                 if (send(new_node_sock, tasks + cur_task, sizeof(task_base_t), 0) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
                     epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
+                    close(new_node_sock);
+                    epoll_event_data_dtor(conn_info);
                     continue;
                 }
 
                 set_task_state(&tasks[cur_task], TASK_IN_PROGRESS);
 
+                epoll_event_data_dtor(conn_info);
+
                 struct epoll_event event = { 0 };
                 event.events = EPOLLIN | EPOLLHUP | EPOLLERR;
-                event.data = events[i].data;
+                event.data.ptr = epoll_event_data_ctor(new_node_sock, cur_task);
 
                 epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
                 cur_task++;
             }
             else if (events[i].events & (EPOLLHUP | EPOLLERR))
             {
-                // need to handle task if was in progress
-                // task_id = ...need to get from epoll node data
-                // requeue_task (tasks + task_id, &cur_task);
                 ERROR(Master, "EPOLLHUP event occured");
-                epoll_ctl(epfd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
+
+                epoll_event_data_dtor(conn_info);
+                requeue_task (tasks, task_id, &cur_task);
+
+                epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
+                close(new_node_sock);
             }
             else
             {
@@ -340,6 +379,8 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
             }
         }
     }
+
+    epoll_event_data_dtor((conn_info_t *)event1.data.ptr);
 
     *result = sum;
     return 0;
