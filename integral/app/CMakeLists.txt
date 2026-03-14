@@ -7,6 +7,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra)
+    add_compile_definitions(_DEFAULT_SOURCE)
 endif()
 
 include_directories(
@@ -28,6 +29,8 @@ target_link_libraries(task_helpers
 )
 
 add_executable(master
+    src/master/master_helpers.c
+    src/master/master_helpers.h
     src/master/master.c
     src/master/master.h
 )

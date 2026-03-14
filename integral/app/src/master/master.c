@@ -17,11 +17,7 @@
 #include <parser.h>
 
 #include "master.h"
-
-typedef struct {
-    int fd;
-    size_t task_id;
-} conn_info_t;
+#include "master_helpers.h"
 
 static int master_sock_tcp = 0;
 
@@ -37,7 +33,7 @@ static const int MAX_NODES = 100;
 
 static char broadcast_addr[INET_ADDRSTRLEN] = "";
 
-int send_broadcast(int master_sock_udp)
+static int send_broadcast(int master_sock_udp)
 {
     struct sockaddr_in bcast = { 0 };
     bcast.sin_family = AF_INET;
@@ -68,6 +64,11 @@ int send_broadcast(int master_sock_udp)
     DEBUG(Master, "sent master node discovery message, bytes=%zd", sent);
 
     return 0;
+}
+
+static void master_shutdown()
+{
+    close(master_sock_tcp);
 }
 
 static void *discovery_loop(void *arg)
@@ -122,47 +123,7 @@ static void stop_discovery_thread(void)
     pthread_join(discovery_thread, NULL);
 }
 
-int start_tcp(task_t *tasks, size_t tasks_cnt)
-{
-    INFO(Master, "waiting for worker nodes to connect...");
-
-    if (accept_connections() < 0)
-        return -1;
-
-    if (start_discovery_thread() < 0)
-    {
-        close(master_sock_tcp);
-        return -1;
-    }
-
-    int epfd = epoll_create(MAX_NODES);
-    if (epfd < 0)
-    {
-		ERROR(Master, "failed to create epoll fd: %s", strerror(errno));
-        stop_discovery_thread();
-        close(master_sock_tcp);
-        return -1;
-    }
-
-    double integral_res;
-    int rc = master_routine(tasks, tasks_cnt, epfd, &integral_res);
-    if (rc < 0)
-    {
-		ERROR(Master, "master routine failed");
-        close(epfd);
-        stop_discovery_thread();
-        master_shutdown();
-        return -1;
-    }
-	INFO(Master, "result is %lf", integral_res);
-
-    close(epfd);
-    stop_discovery_thread();
-    master_shutdown();
-    return rc;
-}
-
-int accept_connections()
+static int accept_connections()
 {
     master_sock_tcp = socket(AF_INET, SOCK_STREAM, 0);
     if (master_sock_tcp < 0)
@@ -185,24 +146,8 @@ int accept_connections()
 		ERROR(Master, "listen failed: %s", strerror(errno));
         return -1;
     }
+
     return 0;
-}
-
-static conn_info_t *epoll_event_data_ctor(int fd, size_t task_id)
-{
-    conn_info_t *new_node_info = malloc(sizeof(conn_info_t));
-    if (!new_node_info)    {
-        ERROR(Master, "failed to allocate memory for new node info");
-        return NULL;
-    }
-    new_node_info->fd = fd;
-    new_node_info->task_id = task_id;
-    return new_node_info;
-}
-
-static void epoll_event_data_dtor(conn_info_t *info)
-{
-    free(info);
 }
 
 static void accept_new_conn(int epfd)
@@ -226,28 +171,7 @@ static void accept_new_conn(int epfd)
     epoll_ctl(epfd, EPOLL_CTL_ADD, new_node_sock, &event);
 }
 
-static void requeue_task(task_t *tasks, size_t task_id, size_t *cur_task_id)
-{
-    if (task_id == SIZE_MAX)
-        return;
-
-    task_t *task = tasks + task_id;
-    if (get_task_state(task) == TASK_PENDING ||
-        get_task_state(task) == TASK_COMPLETED)
-        return;
-
-    set_task_state(task, TASK_PENDING);
-    if (task->base.task_id < *cur_task_id)
-        *cur_task_id = task->base.task_id;
-}
-
-static inline void skip_completed_tasks(size_t *cur_task_id, task_t *tasks, size_t tasks_cnt)
-{
-    while (*cur_task_id < tasks_cnt && get_task_state(&tasks[*cur_task_id]) != TASK_PENDING)
-        (*cur_task_id)++;
-}
-
-int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
+static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;
     size_t ready_nodes = 0;
@@ -298,20 +222,14 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                     if (recv(new_node_sock, &ans, sizeof(ans), 0) <= 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                        close(new_node_sock);
-                        epoll_event_data_dtor(conn_info);
-                        requeue_task (tasks, task_id, &cur_task);
+                        remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
 
                     if (ans.task_id >= tasks_cnt)
                     {
                         ERROR(Master, "received invalid task id %d", ans.task_id);
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                        close(new_node_sock);
-                        epoll_event_data_dtor(conn_info);
-                        requeue_task (tasks, task_id, &cur_task);
+                        remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
 
@@ -328,9 +246,10 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 
                     epoll_event_data_dtor(conn_info);
 
-                    struct epoll_event event = { 0 };
-                    event.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
-                    event.data.ptr = epoll_event_data_ctor(new_node_sock, SIZE_MAX);
+                    struct epoll_event event = {
+                        .events = EPOLLOUT | EPOLLHUP | EPOLLERR,
+                        .data.ptr = epoll_event_data_ctor(new_node_sock, SIZE_MAX)
+                    };
 
                     epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
                 }
@@ -346,32 +265,25 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
                 if (send(new_node_sock, tasks + cur_task, sizeof(task_base_t), 0) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
-                    epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                    close(new_node_sock);
-                    epoll_event_data_dtor(conn_info);
+                    remove_sock(epfd, new_node_sock, conn_info);
                     continue;
                 }
 
-                set_task_state(&tasks[cur_task], TASK_IN_PROGRESS);
-
                 epoll_event_data_dtor(conn_info);
 
-                struct epoll_event event = { 0 };
-                event.events = EPOLLIN | EPOLLHUP | EPOLLERR;
-                event.data.ptr = epoll_event_data_ctor(new_node_sock, cur_task);
-
+                struct epoll_event event = {
+                    .events = EPOLLIN | EPOLLHUP | EPOLLERR,
+                    .data.ptr = epoll_event_data_ctor(new_node_sock, cur_task)
+                };
                 epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
+
+                set_task_state(&tasks[cur_task], TASK_IN_PROGRESS);
                 cur_task++;
             }
             else if (events[i].events & (EPOLLHUP | EPOLLERR))
             {
                 ERROR(Master, "EPOLLHUP event occured");
-
-                epoll_event_data_dtor(conn_info);
-                requeue_task (tasks, task_id, &cur_task);
-
-                epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
-                close(new_node_sock);
+                remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
             }
             else
             {
@@ -386,9 +298,46 @@ int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
     return 0;
 }
 
-void master_shutdown()
+static int start_tcp(task_t *tasks, size_t tasks_cnt)
 {
-    close(master_sock_tcp);
+    INFO(Master, "waiting for worker nodes to connect...");
+    int rc = 0;
+
+    if (accept_connections() < 0)
+    {
+        return -1;
+    }
+
+    if (start_discovery_thread() < 0)
+    {
+		ERROR(Master, "failed to start discovery thread: %s", strerror(errno));
+        master_shutdown();
+        return -1;
+    }
+
+    int epfd = rc = epoll_create(MAX_NODES);
+    if (epfd < 0)
+    {
+		ERROR(Master, "failed to create epoll fd: %s", strerror(errno));
+        goto fail;
+    }
+
+    double integral_res;
+    rc = master_routine(tasks, tasks_cnt, epfd, &integral_res);
+    if (rc < 0)
+    {
+		ERROR(Master, "routine failed");
+        close(epfd);
+        goto fail;
+    }
+
+	INFO(Master, "result is %lf", integral_res);
+
+    close(epfd);
+fail:
+    stop_discovery_thread();
+    master_shutdown();
+    return rc > 0 ? 0 : -1;
 }
 
 int main(const int argc, const char **argv)
