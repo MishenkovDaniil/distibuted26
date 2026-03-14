@@ -38,10 +38,13 @@ int send_broadcast(int master_sock_udp)
     bcast.sin_family = AF_INET;
     bcast.sin_port = htons(DISCOVERY_PORT);
 
-    if (broadcast_addr[0] != '\0')
+    if (broadcast_addr[0] != '\0') // docker
         inet_pton(AF_INET, broadcast_addr, &bcast.sin_addr);
-    else
+    else // localhost
+    {
         bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+        inet_pton(AF_INET, "127.0.0.1", &bcast.sin_addr);
+    }
 
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &bcast.sin_addr, ip_str, sizeof(ip_str));
