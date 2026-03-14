@@ -30,14 +30,18 @@ static volatile int discovery_running = 0;
 static const double DELTA = 0.01;
 static const int MAX_NODES = 100;
 
+static char broadcast_addr[INET_ADDRSTRLEN] = "";
+
 int send_broadcast(int master_sock_udp)
 {
     struct sockaddr_in bcast = { 0 };
     bcast.sin_family = AF_INET;
     bcast.sin_port = htons(DISCOVERY_PORT);
-    bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);// 255.255.255.255
 
-    inet_pton(AF_INET, "127.0.0.1", &bcast.sin_addr);
+    if (broadcast_addr[0] != '\0')
+        inet_pton(AF_INET, broadcast_addr, &bcast.sin_addr);
+    else
+        bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &bcast.sin_addr, ip_str, sizeof(ip_str));
@@ -67,6 +71,7 @@ static void *discovery_loop(void *arg)
 		ERROR(Master, "socket failed: %s", strerror(errno));
         return NULL;
     }
+
     //set socket to do broadcast
     int yes = 1;
     setsockopt(master_sock_udp, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
@@ -346,6 +351,10 @@ int main(const int argc, const char **argv)
         ERROR(Master, "failed to parse master arguments");
         return -1;
     }
+
+    MASTER_PORT = args.master_port;
+    DISCOVERY_PORT = args.discovery_port;
+    snprintf(broadcast_addr, sizeof(broadcast_addr), "%s", args.broadcast_addr);
 
     integral_task_t *tasks = NULL;
     int tasks_cnt = prepare_tasks(&args.task, &tasks);

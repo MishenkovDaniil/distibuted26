@@ -2,6 +2,7 @@
 #define INTEGRAL_BASE_H
 
 #include <stdbool.h>
+#include <arpa/inet.h>
 
 typedef double (*function_t)(double);
 typedef struct integral_task
@@ -23,6 +24,7 @@ typedef struct master_args
 {
     int master_port;
     int discovery_port;
+    char broadcast_addr[INET_ADDRSTRLEN];
     integral_task_t task;
 } master_args_t;
 

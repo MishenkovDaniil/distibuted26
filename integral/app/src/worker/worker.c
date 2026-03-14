@@ -36,6 +36,9 @@ int main(const int argc, const char **argv)
         return -1;
     }
 
+    MASTER_PORT = args.master_port;
+    DISCOVERY_PORT = args.discovery_port;
+
     start_worker();
     return 0;
 }

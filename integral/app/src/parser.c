@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include <log.h>
 
@@ -50,6 +51,10 @@ int parse_master_args(const int argc, const char **argv, master_args_t *args)
 
     args->master_port    = atoi(master_port);
     args->discovery_port = atoi(discovery_port);
+
+    const char *baddr = getenv("BROADCAST_ADDR");
+    if (baddr)
+        snprintf(args->broadcast_addr, sizeof(args->broadcast_addr), "%s", baddr);
 #endif
 
     return 0;
