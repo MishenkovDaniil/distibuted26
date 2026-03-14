@@ -18,6 +18,10 @@ add_library(integral_parser STATIC
     src/parser.c
 )
 
+add_library(task_helpers STATIC
+    src/task.c
+)
+
 add_executable(master
     src/master/master.c
     src/master/master.h
@@ -33,12 +37,14 @@ target_link_libraries(master
         m
         pthread
         integral_parser
+        task_helpers
 )
 
 target_link_libraries(worker
     PRIVATE
         m
         integral_parser
+        task_helpers
 )
 
 install(TARGETS master worker

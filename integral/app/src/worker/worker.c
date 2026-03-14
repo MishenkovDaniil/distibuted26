@@ -39,12 +39,6 @@ int main(const int argc, const char **argv)
     MASTER_PORT = args.master_port;
     DISCOVERY_PORT = args.discovery_port;
 
-    start_worker();
-    return 0;
-}
-
-int start_worker()
-{
     worker_t *worker = malloc(sizeof(worker_t));
     if (!worker)
     {
@@ -52,6 +46,14 @@ int start_worker()
         return -1;
     }
 
+    start_worker(worker);
+
+    free(worker);
+    return 0;
+}
+
+int start_worker(worker_t *worker)
+{
     worker->discovery_socket = socket(AF_INET, SOCK_DGRAM, 0);
     worker->is_alive = false;
 
@@ -110,6 +112,15 @@ static double my_func(double a)
     return a;
 }
 
+static void complete_task (task_base_t *task, answer_t *ans)
+{
+    double left = task->left;
+    double right = task->right;
+
+    ans->result = (right - left) * task->function((right + left) / 2);;
+    ans->task_id = task->task_id;
+}
+
 int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
 {
     int rc;
@@ -132,40 +143,30 @@ int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
 
     for (;;)
     {
-        integral_task_t task;
-
-        rc = recv(worker->discovery_socket, &task, sizeof(task), 0);
-        if (rc < 0)
+        task_base_t task;
+        if (recv(worker->discovery_socket, &task, sizeof(task), 0) < 0)
         {
 			ERROR(Worker, "recv failed: %s", strerror(errno));
             return -1;
         }
 
-		DEBUG(Worker, "received task: left = %lf, right = %lf", task.left, task.right);
+		DEBUG(Worker, "received task: task_id = %d, left = %lf, right = %lf", task.task_id, task.left, task.right);
         task.function = my_func;
 
-        complete_task(&task);
-        rc = send(worker->discovery_socket, &task, sizeof(task), 0);
-        if (rc < 0)
+        answer_t ans;
+        complete_task(&task, &ans);
+
+        if (send(worker->discovery_socket, &ans, sizeof(ans), 0) < 0)
         {
 			ERROR(Worker, "send failed: %s", strerror(errno));
             return -1;
         }
-		DEBUG(Worker, "sent task result: %lf", task.result);
+		DEBUG(Worker, "sent task result: %lf", ans.result);
     }
 
     close(worker->discovery_socket);
 
     return shutdown_worker(worker);
-}
-
-void complete_task (integral_task_t *task)
-{
-    double left = task->left;
-    double right = task->right;
-    function_t function = task->function;
-
-    task->result = (right - left) * function((right + left) / 2);
 }
 
 int shutdown_worker(worker_t *worker)

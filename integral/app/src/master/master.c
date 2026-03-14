@@ -13,6 +13,7 @@
 #include <pthread.h>
 
 #include <log.h>
+#include <task.h>
 #include <parser.h>
 
 #include "master.h"
@@ -27,7 +28,6 @@ static const int DISCOVERY_INTERVAL_USEC = 100000; // 100ms
 static pthread_t discovery_thread;
 static volatile int discovery_running = 0;
 
-static const double DELTA = 0.01;
 static const int MAX_NODES = 100;
 
 static char broadcast_addr[INET_ADDRSTRLEN] = "";
@@ -117,7 +117,7 @@ static void stop_discovery_thread(void)
     pthread_join(discovery_thread, NULL);
 }
 
-int start_tcp(integral_task_t *tasks, size_t tasks_cnt)
+int start_tcp(task_t *tasks, size_t tasks_cnt)
 {
     INFO(Master, "waiting for worker nodes to connect...");
 
@@ -207,7 +207,27 @@ static void accept_new_conn(int epfd)
 
     epoll_ctl(epfd, EPOLL_CTL_ADD, new_node_sock, &event);
 }
-int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *result)
+
+static void requeue_task(task_t *task, size_t *cur_task_id)
+{
+    if (task->base.task_id == *cur_task_id)
+        return;
+
+    if (get_task_state(task) == TASK_PENDING ||
+        get_task_state(task) == TASK_COMPLETED)
+        return;
+
+    set_task_state(task, TASK_PENDING);
+    *cur_task_id = fmin(*cur_task_id, task->base.task_id);
+}
+
+static inline void skip_completed_tasks(size_t *cur_task_id, task_t *tasks, size_t tasks_cnt)
+{
+    while (*cur_task_id < tasks_cnt && get_task_state(&tasks[*cur_task_id]) != TASK_PENDING)
+        (*cur_task_id)++;
+}
+
+int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;
     size_t ready_nodes = 0;
@@ -245,35 +265,59 @@ int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *r
                 else
                 {
                     DEBUG(Master, "received task result from worker node");
-                    integral_task_t task;
-                    if (recv(new_node_sock, &task, sizeof(task), 0) < 0)
+                    answer_t ans;
+                    // task_id = ... need to get from epoll node data
+                    if (recv(new_node_sock, &ans, sizeof(ans), 0) < 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
+                        // requeue_task (tasks + task_id, &cur_task);
                         continue;
                     }
 
-                    sum += task.result;
+                    if (ans.task_id >= tasks_cnt)
+                    {
+                        ERROR(Master, "received invalid task id %d", ans.task_id);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
+                        // requeue_task (tasks + task_id, &cur_task);
+                        continue;
+                    }
+
+                    if (tasks[ans.task_id].state != TASK_IN_PROGRESS)
+                    {
+                        DEBUG(Master, "received result for already completed task id %d", ans.task_id);
+                    }
+                    else
+                    {
+                        set_task_state(&tasks[ans.task_id], TASK_COMPLETED);
+                        sum += ans.result;
+                        ready_nodes++;
+                    }
 
                     struct epoll_event event = { 0 };
                     event.events = EPOLLOUT | EPOLLHUP | EPOLLERR;
                     event.data = events[i].data;
 
                     epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
-                    ready_nodes++;
                 }
             }
             else if(events[i].events & EPOLLOUT)
             {
                 DEBUG(Master, "send task to worker node");
+
+                skip_completed_tasks(&cur_task, tasks, tasks_cnt);
                 if (cur_task >= tasks_cnt)
                     continue;
 
                 int new_node_sock = events[i].data.fd;
-                if (send(new_node_sock, tasks + cur_task, sizeof(integral_task_t), 0) < 0)
+                if (send(new_node_sock, tasks + cur_task, sizeof(task_base_t), 0) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, new_node_sock, NULL);
                     continue;
                 }
+
+                set_task_state(&tasks[cur_task], TASK_IN_PROGRESS);
 
                 struct epoll_event event = { 0 };
                 event.events = EPOLLIN | EPOLLHUP | EPOLLERR;
@@ -282,13 +326,13 @@ int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *r
                 epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
                 cur_task++;
             }
-            else if (events[i].events & EPOLLHUP)
+            else if (events[i].events & (EPOLLHUP | EPOLLERR))
             {
+                // need to handle task if was in progress
+                // task_id = ...need to get from epoll node data
+                // requeue_task (tasks + task_id, &cur_task);
                 ERROR(Master, "EPOLLHUP event occured");
-            }
-            else if (events[i].events & EPOLLERR)
-            {
-                ERROR(Master, "EPOLLERR event occured");
+                epoll_ctl(epfd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
             }
             else
             {
@@ -304,42 +348,6 @@ int master_routine(integral_task_t *tasks, size_t tasks_cnt, int epfd, double *r
 void master_shutdown()
 {
     close(master_sock_tcp);
-}
-
-ssize_t prepare_tasks(integral_task_t *task, integral_task_t **tasks)
-{
-    if (task->right <= task->left)
-        return -1;
-
-    size_t tasks_cnt = (size_t)ceil((task->right - task->left) / DELTA);
-    if (tasks_cnt == 0)
-        return -1;
-
-    *tasks = (integral_task_t *)malloc(sizeof(integral_task_t) * tasks_cnt);
-    if (!*tasks)
-        return -1;
-
-    double left = task->left;
-    for (size_t i = 0; i < tasks_cnt; ++i)
-    {
-        double right = left + DELTA;
-        if (right > task->right)
-            right = task->right;
-
-        (*tasks)[i].function = NULL;
-        (*tasks)[i].result = 0.0;
-        (*tasks)[i].left = left;
-        (*tasks)[i].right = right;
-
-        left = right;
-    }
-
-    return tasks_cnt;
-}
-
-void clear_tasks(integral_task_t *tasks)
-{
-    free(tasks);
 }
 
 int main(const int argc, const char **argv)
@@ -359,7 +367,7 @@ int main(const int argc, const char **argv)
     DISCOVERY_PORT = args.discovery_port;
     snprintf(broadcast_addr, sizeof(broadcast_addr), "%s", args.broadcast_addr);
 
-    integral_task_t *tasks = NULL;
+    task_t *tasks = NULL;
     int tasks_cnt = prepare_tasks(&args.task, &tasks);
     if (tasks_cnt <= 0)
     {
@@ -368,7 +376,7 @@ int main(const int argc, const char **argv)
     }
 
     start_tcp(tasks, tasks_cnt);
-    clear_tasks(tasks);
+    clear_tasks(&tasks);
 
     return 0;
 }
