@@ -31,6 +31,9 @@ ssize_t prepare_tasks(task_base_t *main_task, task_t **tasks)
         (*tasks)[i].base.left = left;
         (*tasks)[i].base.right = right;
         (*tasks)[i].state = TASK_PENDING;
+        (*tasks)[i].worker_fd = -1;
+        (*tasks)[i].base.execution_id = 0;
+        (*tasks)[i].deadline = (struct timespec){0};
 
         left = right;
     }

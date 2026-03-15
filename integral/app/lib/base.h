@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 typedef enum task_state
 {
@@ -18,12 +19,14 @@ typedef struct task_base
     double right;
     function_t function;
     size_t task_id;
+    int execution_id;
 } task_base_t;
 
 typedef struct answer
 {
     size_t task_id;
     double result;
+    int execution_id;
 } answer_t;
 
 typedef struct task
@@ -31,6 +34,7 @@ typedef struct task
     task_base_t base;
     int worker_fd;
     task_state_t state;
+    struct timespec deadline;
 } task_t;
 
 typedef struct worker_args
