@@ -29,6 +29,8 @@ target_link_libraries(task_helpers
 )
 
 add_executable(master
+    src/master/priority_queue.c
+    src/master/priority_queue.h
     src/master/master_helpers.c
     src/master/master_helpers.h
     src/master/master.c

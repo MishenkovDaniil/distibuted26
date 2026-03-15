@@ -119,6 +119,7 @@ static void complete_task (task_base_t *task, answer_t *ans)
 
     ans->result = (right - left) * task->function((right + left) / 2);;
     ans->task_id = task->task_id;
+    ans->execution_id = task->execution_id;
 }
 
 int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)

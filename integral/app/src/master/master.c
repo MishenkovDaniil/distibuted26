@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <pthread.h>
 
 #include <log.h>
@@ -18,6 +19,7 @@
 
 #include "master.h"
 #include "master_helpers.h"
+#include "priority_queue.h"
 
 static int master_sock_tcp = 0;
 
@@ -29,9 +31,17 @@ static const int DISCOVERY_INTERVAL_USEC = 100000; // 100ms
 static pthread_t discovery_thread;
 static volatile int discovery_running = 0;
 
+static const int TIMEOUT_SEC = 1;
+
 static const int MAX_NODES = 100;
 
 static char broadcast_addr[INET_ADDRSTRLEN] = "";
+
+/* Convert timespec to double (seconds with nanosecond precision) */
+static inline double timespec_to_double(struct timespec ts)
+{
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
 
 static int send_broadcast(int master_sock_udp)
 {
@@ -171,6 +181,24 @@ static void accept_new_conn(int epfd)
     epoll_ctl(epfd, EPOLL_CTL_ADD, new_node_sock, &event);
 }
 
+static void remove_dead_tasks(size_t *cur_task, pqueue_t *pqueue)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double now_dbl = timespec_to_double(now);
+
+    /* Remove all tasks with expired deadlines (deadline <= now) */
+    while (!pqueue_is_empty(pqueue) && pqueue_get_top_key(pqueue) <= now_dbl) {
+        task_t *expired_task = (task_t *)pqueue_del_top(pqueue);
+        if (expired_task != NULL) {
+            DEBUG(Master, "task %zu timed out", expired_task->base.task_id);
+            set_task_state(expired_task, TASK_PENDING);
+            if (expired_task->base.task_id < *cur_task)
+                *cur_task = expired_task->base.task_id;
+        }
+    }
+}
+
 static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;
@@ -183,6 +211,28 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
 
     epoll_ctl(epfd, EPOLL_CTL_ADD, master_sock_tcp, &event1);
 
+    int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+    if (tfd < 0) {
+        ERROR(Master, "timerfd_create failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (timerfd_settime(tfd, 0, &(struct itimerspec){
+        .it_interval = { .tv_sec = TIMEOUT_SEC, .tv_nsec = 0 },
+        .it_value = { .tv_sec = TIMEOUT_SEC, .tv_nsec = 0 }
+    }, NULL) < 0) {
+        ERROR(Master, "timerfd_settime failed: %s", strerror(errno));
+        close(tfd);
+        return -1;
+    }
+
+    struct epoll_event tevent = { 0 };
+    tevent.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+    tevent.data.ptr = epoll_event_data_ctor(tfd, SIZE_MAX);
+    pqueue_t *pqueue = pqueue_ctor();
+
+    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &tevent);
+
     while (1)
     {
         if (ready_nodes == tasks_cnt)
@@ -193,6 +243,10 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
         if (ready_nodes_cnt < 0)
         {
             ERROR(Master, "epoll wait failed - %s(%d)", strerror(errno), errno);
+            epoll_event_data_dtor((conn_info_t *)event1.data.ptr);
+            epoll_event_data_dtor((conn_info_t *)tevent.data.ptr);
+            pqueue_dtor(pqueue);
+            close(tfd);
             return -1;
         }
 
@@ -202,6 +256,22 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
             if (!conn_info)
             {
                 ERROR(Master, "invalid epoll event data");
+                continue;
+            }
+
+            if(conn_info->fd == tfd)
+            {
+                if (events[i].events & EPOLLIN)
+                {
+                    DEBUG(Master, "EPOLLIN event on timerfd");
+                    uint64_t expirations;
+                    read(tfd, &expirations, sizeof(expirations));
+                    remove_dead_tasks(&cur_task, pqueue);
+                }
+                else
+                {
+                    ERROR(Master, "error event(%d) on timerfd...", events[i].events);
+                }
                 continue;
             }
 
@@ -228,17 +298,20 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
 
                     if (ans.task_id >= tasks_cnt)
                     {
-                        ERROR(Master, "received invalid task id %d", ans.task_id);
+                        ERROR(Master, "received invalid task id %zu", ans.task_id);
                         remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
 
-                    if (tasks[ans.task_id].state != TASK_IN_PROGRESS)
+                    if (tasks[ans.task_id].state != TASK_IN_PROGRESS ||
+                        tasks[ans.task_id].worker_fd != new_node_sock ||
+                        tasks[ans.task_id].base.execution_id != ans.execution_id)
                     {
-                        DEBUG(Master, "received result for already completed task id %d", ans.task_id);
+                        DEBUG(Master, "received result for already completed task id %zu", ans.task_id);
                     }
                     else
                     {
+                        pqueue_del(pqueue, tasks + ans.task_id, timespec_to_double(tasks[ans.task_id].deadline));
                         set_task_state(&tasks[ans.task_id], TASK_COMPLETED);
                         sum += ans.result;
                         ready_nodes++;
@@ -262,12 +335,19 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                 if (cur_task >= tasks_cnt)
                     continue;
 
+                tasks[cur_task].base.execution_id += 1;
                 if (send(new_node_sock, tasks + cur_task, sizeof(task_base_t), 0) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
+                    tasks[cur_task].base.execution_id -= 1;
                     remove_sock(epfd, new_node_sock, conn_info);
                     continue;
                 }
+
+                clock_gettime(CLOCK_MONOTONIC, &tasks[cur_task].deadline);
+                tasks[cur_task].deadline.tv_sec += TIMEOUT_SEC;
+                tasks[cur_task].worker_fd = new_node_sock;
+                pqueue_add(pqueue, tasks + cur_task, timespec_to_double(tasks[cur_task].deadline));
 
                 epoll_event_data_dtor(conn_info);
 
@@ -293,6 +373,9 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
     }
 
     epoll_event_data_dtor((conn_info_t *)event1.data.ptr);
+    epoll_event_data_dtor((conn_info_t *)tevent.data.ptr);
+    pqueue_dtor(pqueue);
+    close(tfd);
 
     *result = sum;
     return 0;
