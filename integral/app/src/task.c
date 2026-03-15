@@ -19,10 +19,10 @@ ssize_t prepare_tasks(task_base_t *main_task, task_t **tasks)
     if (!*tasks)
         return -1;
 
-    double left = main_task->left;
     for (size_t i = 0; i < tasks_cnt; ++i)
     {
-        double right = left + DELTA;
+        double left = main_task->left + i * DELTA;
+        double right = main_task->left + (i + 1) * DELTA;
         if (right > main_task->right)
             right = main_task->right;
 
@@ -34,8 +34,6 @@ ssize_t prepare_tasks(task_base_t *main_task, task_t **tasks)
         (*tasks)[i].worker_fd = -1;
         (*tasks)[i].base.execution_id = 0;
         (*tasks)[i].deadline = (struct timespec){0};
-
-        left = right;
     }
 
     return tasks_cnt;

@@ -32,7 +32,7 @@ static const int DISCOVERY_INTERVAL_USEC = 100000; // 100ms
 static pthread_t discovery_thread;
 static volatile int discovery_running = 0;
 
-static const int TIMEOUT_SEC = 1;
+static const int TIMEOUT_SEC = 3;
 
 static const int MAX_NODES = 100;
 
@@ -203,6 +203,7 @@ static void remove_dead_tasks(size_t *cur_task, pqueue_t *pqueue)
 static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;
+    double kahan_comp = 0; /* Kahan summation compensator */
     size_t ready_nodes = 0;
     size_t cur_task = 0;
 
@@ -314,7 +315,10 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     {
                         pqueue_del(pqueue, tasks + ans.task_id, timespec_to_double(tasks[ans.task_id].deadline));
                         set_task_state(&tasks[ans.task_id], TASK_COMPLETED);
-                        sum += ans.result;
+                        double y = ans.result - kahan_comp;
+                        double t = sum + y;
+                        kahan_comp = (t - sum) - y;
+                        sum = t;
                         ready_nodes++;
                     }
 
