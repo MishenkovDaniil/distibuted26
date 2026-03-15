@@ -15,6 +15,7 @@
 #include <errno.h>
 
 #include <log.h>
+#include <net.h>
 #include <parser.h>
 
 #include "worker.h"
@@ -145,7 +146,7 @@ int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
     for (;;)
     {
         task_base_t task;
-        if (recv(worker->discovery_socket, &task, sizeof(task), 0) < 0)
+        if (recv_all(worker->discovery_socket, &task, sizeof(task)) < 0)
         {
 			ERROR(Worker, "recv failed: %s", strerror(errno));
             return -1;
@@ -157,7 +158,7 @@ int worker_routine(worker_t *worker, struct sockaddr_in *master_addr)
         answer_t ans;
         complete_task(&task, &ans);
 
-        if (send(worker->discovery_socket, &ans, sizeof(ans), 0) < 0)
+        if (send_all(worker->discovery_socket, &ans, sizeof(ans)) < 0)
         {
 			ERROR(Worker, "send failed: %s", strerror(errno));
             return -1;

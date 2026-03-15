@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #include <log.h>
+#include <net.h>
 #include <task.h>
 #include <parser.h>
 
@@ -289,7 +290,7 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                 {
                     DEBUG(Master, "received task result from worker node");
                     answer_t ans;
-                    if (recv(new_node_sock, &ans, sizeof(ans), 0) <= 0)
+                    if (recv_all(new_node_sock, &ans, sizeof(ans)) < 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
                         remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
@@ -336,7 +337,7 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     continue;
 
                 tasks[cur_task].base.execution_id += 1;
-                if (send(new_node_sock, tasks + cur_task, sizeof(task_base_t), 0) < 0)
+                if (send_all(new_node_sock, &tasks[cur_task].base, sizeof(task_base_t)) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
                     tasks[cur_task].base.execution_id -= 1;
