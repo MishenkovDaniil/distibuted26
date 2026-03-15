@@ -5,6 +5,9 @@ services:
       dockerfile: docker/master/Dockerfile
     env_file:
       - ./config/master.env
+    environment:
+      - INTEGRAL_LEFT=${INTEGRAL_LEFT:-0}
+      - INTEGRAL_RIGHT=${INTEGRAL_RIGHT:-10000}
     networks:
       - integral_network
 
