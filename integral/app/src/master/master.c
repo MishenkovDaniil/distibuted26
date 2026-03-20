@@ -1,5 +1,3 @@
-#include <errno.h>
-#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,12 +35,6 @@ static const int TIMEOUT_SEC = 3;
 static const int MAX_NODES = 100;
 
 static char broadcast_addr[INET_ADDRSTRLEN] = "";
-
-/* Convert timespec to double (seconds with nanosecond precision) */
-static inline double timespec_to_double(struct timespec ts)
-{
-    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
-}
 
 static int send_broadcast(int master_sock_udp)
 {
@@ -82,6 +74,7 @@ static void master_shutdown()
     close(master_sock_tcp);
 }
 
+/* send_broadcast on udp socket while discovery flag is set */
 static void *discovery_loop(void *arg)
 {
     (void)arg;
@@ -134,6 +127,7 @@ static void stop_discovery_thread(void)
     pthread_join(discovery_thread, NULL);
 }
 
+/* Set up TCP socket to accept new connections */
 static int accept_connections()
 {
     master_sock_tcp = socket(AF_INET, SOCK_STREAM, 0);
@@ -203,15 +197,15 @@ static void remove_dead_tasks(size_t *cur_task, pqueue_t *pqueue)
 static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *result)
 {
     double sum = 0;
-    double kahan_comp = 0; /* Kahan summation compensator */
+    double kahan_comp = 0;
     size_t ready_nodes = 0;
     size_t cur_task = 0;
 
-    struct epoll_event event1 = { 0 };
-    event1.events = EPOLLIN | EPOLLHUP | EPOLLERR;
-    event1.data.ptr = epoll_event_data_ctor(master_sock_tcp, SIZE_MAX);
+    struct epoll_event master_sock_ev = { 0 };
+    master_sock_ev.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+    master_sock_ev.data.ptr = epoll_event_data_ctor(master_sock_tcp, SIZE_MAX);
 
-    epoll_ctl(epfd, EPOLL_CTL_ADD, master_sock_tcp, &event1);
+    epoll_ctl(epfd, EPOLL_CTL_ADD, master_sock_tcp, &master_sock_ev);
 
     int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
     if (tfd < 0) {
@@ -228,12 +222,12 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
         return -1;
     }
 
-    struct epoll_event tevent = { 0 };
-    tevent.events = EPOLLIN | EPOLLHUP | EPOLLERR;
-    tevent.data.ptr = epoll_event_data_ctor(tfd, SIZE_MAX);
+    struct epoll_event timer_ev = { 0 };
+    timer_ev.events = EPOLLIN | EPOLLHUP | EPOLLERR;
+    timer_ev.data.ptr = epoll_event_data_ctor(tfd, SIZE_MAX);
     pqueue_t *pqueue = pqueue_ctor();
 
-    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &tevent);
+    epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &timer_ev);
 
     while (1)
     {
@@ -245,8 +239,8 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
         if (ready_nodes_cnt < 0)
         {
             ERROR(Master, "epoll wait failed - %s(%d)", strerror(errno), errno);
-            epoll_event_data_dtor((conn_info_t *)event1.data.ptr);
-            epoll_event_data_dtor((conn_info_t *)tevent.data.ptr);
+            epoll_event_data_dtor((conn_info_t *)master_sock_ev.data.ptr);
+            epoll_event_data_dtor((conn_info_t *)timer_ev.data.ptr);
             pqueue_dtor(pqueue);
             close(tfd);
             return -1;
@@ -261,6 +255,7 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                 continue;
             }
 
+            /* event on timerfd */
             if(conn_info->fd == tfd)
             {
                 if (events[i].events & EPOLLIN)
@@ -277,36 +272,37 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                 continue;
             }
 
-            int new_node_sock = conn_info->fd;
+            int event_sock = conn_info->fd;
             const size_t task_id = conn_info->task_id;
 
             if(events[i].events & EPOLLIN)
             {
-                if (new_node_sock == master_sock_tcp)
+                /* event on master tcp socket (new worker connected)*/
+                if (event_sock == master_sock_tcp)
                 {
                     INFO(Master, "accept_new_conn");
                     accept_new_conn(epfd);
                 }
-                else
+                else /* event on worker socket */
                 {
                     DEBUG(Master, "received task result from worker node");
                     answer_t ans;
-                    if (recv_all(new_node_sock, &ans, sizeof(ans)) < 0)
+                    if (recv_all(event_sock, &ans, sizeof(ans)) < 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
-                        remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
+                        remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
 
                     if (ans.task_id >= tasks_cnt)
                     {
                         ERROR(Master, "received invalid task id %zu", ans.task_id);
-                        remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
+                        remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
 
                     if (tasks[ans.task_id].state != TASK_IN_PROGRESS ||
-                        tasks[ans.task_id].worker_fd != new_node_sock ||
+                        tasks[ans.task_id].worker_fd != event_sock ||
                         tasks[ans.task_id].base.execution_id != ans.execution_id)
                     {
                         DEBUG(Master, "received result for already completed task id %zu", ans.task_id);
@@ -315,10 +311,7 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     {
                         pqueue_del(pqueue, tasks + ans.task_id, timespec_to_double(tasks[ans.task_id].deadline));
                         set_task_state(&tasks[ans.task_id], TASK_COMPLETED);
-                        double y = ans.result - kahan_comp;
-                        double t = sum + y;
-                        kahan_comp = (t - sum) - y;
-                        sum = t;
+                        kahan_sum(&sum, &kahan_comp, ans.result);
                         ready_nodes++;
                     }
 
@@ -326,10 +319,10 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
 
                     struct epoll_event event = {
                         .events = EPOLLOUT | EPOLLHUP | EPOLLERR,
-                        .data.ptr = epoll_event_data_ctor(new_node_sock, SIZE_MAX)
+                        .data.ptr = epoll_event_data_ctor(event_sock, SIZE_MAX)
                     };
 
-                    epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
+                    epoll_ctl(epfd, EPOLL_CTL_MOD, event_sock, &event);
                 }
             }
             else if(events[i].events & EPOLLOUT)
@@ -341,26 +334,26 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     continue;
 
                 tasks[cur_task].base.execution_id += 1;
-                if (send_all(new_node_sock, &tasks[cur_task].base, sizeof(task_base_t)) < 0)
+                if (send_all(event_sock, &tasks[cur_task].base, sizeof(task_base_t)) < 0)
                 {
                     ERROR(Master, "failed to send task to worker: %s", strerror(errno));
                     tasks[cur_task].base.execution_id -= 1;
-                    remove_sock(epfd, new_node_sock, conn_info);
+                    remove_sock(epfd, event_sock, conn_info);
                     continue;
                 }
 
                 clock_gettime(CLOCK_MONOTONIC, &tasks[cur_task].deadline);
                 tasks[cur_task].deadline.tv_sec += TIMEOUT_SEC;
-                tasks[cur_task].worker_fd = new_node_sock;
+                tasks[cur_task].worker_fd = event_sock;
                 pqueue_add(pqueue, tasks + cur_task, timespec_to_double(tasks[cur_task].deadline));
 
                 epoll_event_data_dtor(conn_info);
 
                 struct epoll_event event = {
                     .events = EPOLLIN | EPOLLHUP | EPOLLERR,
-                    .data.ptr = epoll_event_data_ctor(new_node_sock, cur_task)
+                    .data.ptr = epoll_event_data_ctor(event_sock, cur_task)
                 };
-                epoll_ctl(epfd, EPOLL_CTL_MOD, new_node_sock, &event);
+                epoll_ctl(epfd, EPOLL_CTL_MOD, event_sock, &event);
 
                 set_task_state(&tasks[cur_task], TASK_IN_PROGRESS);
                 cur_task++;
@@ -368,7 +361,7 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
             else if (events[i].events & (EPOLLHUP | EPOLLERR))
             {
                 ERROR(Master, "EPOLLHUP event occured");
-                remove_sock_and_requeue_task(epfd, new_node_sock, conn_info, tasks, task_id, &cur_task);
+                remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
             }
             else
             {
@@ -377,8 +370,8 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
         }
     }
 
-    epoll_event_data_dtor((conn_info_t *)event1.data.ptr);
-    epoll_event_data_dtor((conn_info_t *)tevent.data.ptr);
+    epoll_event_data_dtor((conn_info_t *)master_sock_ev.data.ptr);
+    epoll_event_data_dtor((conn_info_t *)timer_ev.data.ptr);
     pqueue_dtor(pqueue);
     close(tfd);
 

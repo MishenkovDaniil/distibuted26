@@ -2,6 +2,7 @@
 #define MASTER_HELPERS_H
 
 #include <stdlib.h>
+#include <time.h>
 
 #include <log.h>
 #include <task.h>
@@ -19,6 +20,19 @@ static inline void skip_completed_tasks(size_t *cur_task_id, task_t *tasks, size
 {
     while (*cur_task_id < tasks_cnt && get_task_state(&tasks[*cur_task_id]) != TASK_PENDING)
         (*cur_task_id)++;
+}
+
+static inline void kahan_sum(double *sum, double *kahan_comp, double new_val)
+{
+    double y = new_val - *kahan_comp;
+    double t = *sum + y;
+    *kahan_comp = (t - *sum) - y;
+    *sum = t;
+}
+
+static inline double timespec_to_double(struct timespec ts)
+{
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 #endif /* MASTER_HELPERS_H */
