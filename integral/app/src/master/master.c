@@ -30,7 +30,7 @@ static const int DISCOVERY_INTERVAL_USEC = 100000; // 100ms
 static pthread_t discovery_thread;
 static volatile int discovery_running = 0;
 
-static const int TIMEOUT_SEC = 3;
+static const int TIMEOUT_SEC = 5;
 
 static const int MAX_NODES = 100;
 
