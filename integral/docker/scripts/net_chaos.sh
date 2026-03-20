@@ -20,7 +20,7 @@ set -e
 #   show    <container>                       - show current tc/iptables rules
 
 usage() {
-    sed -n '3,18p' "$0" | sed 's/^# \?//'
+    sed -n '4,20p' "$0" | sed 's/^# \?//'
     exit 1
 }
 

@@ -120,7 +120,7 @@ separator() {
 # ---------- Scenarios ----------
 
 scenario_1() {
-    separator "SCENARIO 1: Latency on one worker (4000ms)" \
+    separator "SCENARIO 1: Latency on one worker (6000ms)" \
               "Delay > TIMEOUT -> tasks reassigned to other workers"
     start_stack
 
