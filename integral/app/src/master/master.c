@@ -290,6 +290,9 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     if (recv_all(event_sock, &ans, sizeof(ans)) < 0)
                     {
                         ERROR(Master, "receive of task result failed: %s", strerror(errno));
+                        if (task_id != SIZE_MAX && tasks[task_id].state == TASK_IN_PROGRESS) {
+                            pqueue_del(pqueue, tasks + task_id, timespec_to_double(tasks[task_id].deadline));
+                        }
                         remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
@@ -297,6 +300,9 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
                     if (ans.task_id >= tasks_cnt)
                     {
                         ERROR(Master, "received invalid task id %zu", ans.task_id);
+                        if (task_id != SIZE_MAX && tasks[task_id].state == TASK_IN_PROGRESS) {
+                            pqueue_del(pqueue, tasks + task_id, timespec_to_double(tasks[task_id].deadline));
+                        }
                         remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
                         continue;
                     }
@@ -361,6 +367,9 @@ static int master_routine(task_t *tasks, size_t tasks_cnt, int epfd, double *res
             else if (events[i].events & (EPOLLHUP | EPOLLERR))
             {
                 ERROR(Master, "EPOLLHUP event occured");
+                if (task_id != SIZE_MAX && tasks[task_id].state == TASK_IN_PROGRESS) {
+                    pqueue_del(pqueue, tasks + task_id, timespec_to_double(tasks[task_id].deadline));
+                }
                 remove_sock_and_requeue_task(epfd, event_sock, conn_info, tasks, task_id, &cur_task);
             }
             else
